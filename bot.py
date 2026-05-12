@@ -1,27 +1,37 @@
-import os, time, uuid, re
+import os
+import time
+import uuid
+import re
 from datetime import datetime, timedelta
-from flask import Flask, request
+
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pymongo import MongoClient
+from flask import Flask, request
 import razorpay
+
+# ================= CONFIG =================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").rstrip("/")
+
 RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID")
 RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET")
 
 bot = telebot.TeleBot(BOT_TOKEN)
-client = MongoClient(MONGO_URI)
 
+client = MongoClient(MONGO_URI)
 db = client["sub_management"]
+
 users_col = db["users"]
 links_col = db["short_links"]
 payments_col = db["razorpay_payments"]
 
 rzp = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
+
+# ================= PLANS =================
 
 PLANS = {
     "2880": {"name": "2 Days", "price": 50},
@@ -29,6 +39,8 @@ PLANS = {
     "43200": {"name": "1 Month", "price": 250},
     "129600": {"name": "3 Months", "price": 650},
 }
+
+# ================= FLASK =================
 
 app = Flask(__name__)
 
@@ -39,16 +51,28 @@ def home():
 @app.route(f"/{BOT_TOKEN}", methods=["POST"])
 def telegram_webhook():
     try:
-        update = telebot.types.Update.de_json(request.get_data().decode("utf-8"))
+        json_string = request.get_data().decode("utf-8")
+        print("RAW UPDATE:", json_string)
+
+        update = telebot.types.Update.de_json(json_string)
+
+        if update.message:
+            print("MESSAGE TEXT:", update.message.text)
+            print("FROM ID:", update.message.from_user.id)
+
         bot.process_new_updates([update])
         return "OK", 200
+
     except Exception as e:
-        print("Webhook Error:", e)
+        print("WEBHOOK ERROR:", e)
         return "ERROR", 500
+
+# ================= PAYMENT PAGE =================
 
 @app.route("/pay/<order_id>")
 def pay_page(order_id):
     pay = payments_col.find_one({"order_id": order_id})
+
     if not pay:
         return "Invalid payment link", 404
 
@@ -60,9 +84,29 @@ def pay_page(order_id):
 <title>Pay Now</title>
 <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
 <style>
-body{{font-family:Arial;background:#f4f7ff;text-align:center;padding:25px}}
-.card{{background:white;max-width:420px;margin:auto;padding:25px;border-radius:18px;box-shadow:0 10px 25px #0002}}
-button{{background:#2563eb;color:white;border:0;padding:14px 24px;border-radius:12px;font-size:18px;font-weight:bold}}
+body {{
+    font-family: Arial;
+    background: #f4f7ff;
+    text-align: center;
+    padding: 25px;
+}}
+.card {{
+    background: white;
+    max-width: 420px;
+    margin: auto;
+    padding: 25px;
+    border-radius: 18px;
+    box-shadow: 0 10px 25px #0002;
+}}
+button {{
+    background: #2563eb;
+    color: white;
+    border: 0;
+    padding: 14px 24px;
+    border-radius: 12px;
+    font-size: 18px;
+    font-weight: bold;
+}}
 </style>
 </head>
 <body>
@@ -85,8 +129,10 @@ var options = {{
     "redirect": true,
     "theme": {{"color": "#2563eb"}}
 }};
+
 var rzp1 = new Razorpay(options);
-document.getElementById("payBtn").onclick = function(e){{
+
+document.getElementById("payBtn").onclick = function(e) {{
     rzp1.open();
     e.preventDefault();
 }}
@@ -105,6 +151,7 @@ def payment_callback():
         return "Payment failed or cancelled."
 
     pay = payments_col.find_one({"order_id": order_id})
+
     if not pay:
         return "Payment record not found."
 
@@ -117,7 +164,9 @@ def payment_callback():
             "razorpay_payment_id": payment_id,
             "razorpay_signature": signature
         })
-    except Exception:
+
+    except Exception as e:
+        print("PAYMENT VERIFY ERROR:", e)
         payments_col.update_one(
             {"order_id": order_id},
             {"$set": {"status": "failed"}}
@@ -145,7 +194,11 @@ def payment_callback():
         }}
     )
 
-    msg = f"✅ Payment Successful!\n\n👑 Membership Activated\n📅 Expiry: {get_expiry_date(expiry)}"
+    msg = (
+        f"✅ Payment Successful!\n\n"
+        f"👑 Membership Activated\n"
+        f"📅 Expiry: {get_expiry_date(expiry)}"
+    )
 
     if fid:
         link_data = links_col.find_one({"file_id": fid})
@@ -155,9 +208,11 @@ def payment_callback():
     try:
         bot.send_message(uid, msg, disable_web_page_preview=True)
     except Exception as e:
-        print("Send message error:", e)
+        print("BOT SEND ERROR:", e)
 
     return "<h2>Payment Successful ✅</h2><p>Membership activated. Go back to Telegram.</p>"
+
+# ================= HELPERS =================
 
 def is_prime(uid):
     user = users_col.find_one({"user_id": uid})
@@ -190,12 +245,22 @@ def create_order(uid, fid, mins):
 
     return order["id"]
 
+# ================= TEST ID =================
+
 @bot.message_handler(commands=["id"])
 def get_id(message):
-    bot.reply_to(message, f"🆔 Your Telegram ID:\n{message.from_user.id}")
+    print("ID COMMAND HIT:", message.from_user.id)
+    bot.send_message(
+        message.chat.id,
+        f"🆔 Your Telegram ID:\n{message.from_user.id}"
+    )
+
+# ================= USER START =================
 
 @bot.message_handler(commands=["start"])
 def start_handler(message):
+    print("START COMMAND HIT:", message.from_user.id)
+
     uid = message.from_user.id
 
     users_col.update_one(
@@ -211,6 +276,7 @@ def start_handler(message):
 
         if is_prime(uid):
             link_data = links_col.find_one({"file_id": fid})
+
             if link_data:
                 bot.send_message(
                     uid,
@@ -219,6 +285,7 @@ def start_handler(message):
                 )
             else:
                 bot.send_message(uid, "❌ Link expired or removed.")
+
             return
 
         markup = InlineKeyboardMarkup()
@@ -244,6 +311,8 @@ def start_handler(message):
 
     bot.send_message(uid, text)
 
+# ================= PAYMENT BUTTON =================
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith("pay_"))
 def pay_handler(call):
     bot.answer_callback_query(call.id)
@@ -261,12 +330,18 @@ def pay_handler(call):
 
         bot.send_message(
             call.message.chat.id,
-            f"💰 Payment Details\n\nPlan: {plan['name']}\nAmount: ₹{plan['price']}\n\nClick below to pay securely.",
+            f"💰 Payment Details\n\n"
+            f"Plan: {plan['name']}\n"
+            f"Amount: ₹{plan['price']}\n\n"
+            f"Click below to pay securely.",
             reply_markup=markup
         )
 
     except Exception as e:
+        print("PAY HANDLER ERROR:", e)
         bot.send_message(call.message.chat.id, f"❌ Error:\n{str(e)}")
+
+# ================= ADMIN =================
 
 @bot.message_handler(commands=["stats"])
 def stats_handler(message):
@@ -274,13 +349,19 @@ def stats_handler(message):
         return
 
     total_users = users_col.count_documents({})
-    active_prime = users_col.count_documents({"expiry": {"$gt": datetime.now().timestamp()}})
+    active_prime = users_col.count_documents({
+        "expiry": {"$gt": datetime.now().timestamp()}
+    })
     total_links = links_col.count_documents({})
     paid = payments_col.count_documents({"status": "paid"})
 
     bot.reply_to(
         message,
-        f"📊 Bot Stats\n\n👤 Users: {total_users}\n👑 Active Prime: {active_prime}\n🔗 Links: {total_links}\n💰 Paid Payments: {paid}"
+        f"📊 Bot Stats\n\n"
+        f"👤 Users: {total_users}\n"
+        f"👑 Active Prime: {active_prime}\n"
+        f"🔗 Links: {total_links}\n"
+        f"💰 Paid Payments: {paid}"
     )
 
 @bot.message_handler(commands=["approve"])
@@ -290,6 +371,7 @@ def approve_user(message):
 
     try:
         args = message.text.split()
+
         if len(args) < 3:
             return bot.reply_to(message, "Format: /approve USER_ID DAYS")
 
@@ -304,7 +386,11 @@ def approve_user(message):
             upsert=True
         )
 
-        bot.send_message(target_id, f"✅ Admin activated your membership for {days} days.")
+        bot.send_message(
+            target_id,
+            f"✅ Admin activated your membership for {days} days."
+        )
+
         bot.reply_to(message, "Approved ✅")
 
     except Exception as e:
@@ -317,6 +403,7 @@ def unapprove_user(message):
 
     try:
         args = message.text.split()
+
         if len(args) < 2:
             return bot.reply_to(message, "Format: /unapprove USER_ID")
 
@@ -352,9 +439,11 @@ def save_link(message):
     })
 
     username = bot.get_me().username
+
     bot.send_message(
         ADMIN_ID,
-        f"✅ Link Created!\n\nhttps://t.me/{username}?start=vid_{file_id}"
+        f"✅ Link Created!\n\n"
+        f"https://t.me/{username}?start=vid_{file_id}"
     )
 
 @bot.message_handler(commands=["broadcast"])
@@ -378,16 +467,26 @@ def send_broadcast(message):
 
     bot.send_message(ADMIN_ID, f"✅ Broadcast sent to {count} users.")
 
+# ================= WEBHOOK SET =================
+
 try:
     bot.remove_webhook()
     time.sleep(2)
+
     bot.set_webhook(
         url=f"{WEBHOOK_URL}/{BOT_TOKEN}",
         drop_pending_updates=True
     )
+
     print("✅ Webhook Set Successfully:", f"{WEBHOOK_URL}/{BOT_TOKEN}")
+
 except Exception as e:
-    print("❌ Webhook Error:", e)
+    print("❌ Webhook Set Error:", e)
+
+# ================= RUN =================
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+    app.run(
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", 5000))
+    )
