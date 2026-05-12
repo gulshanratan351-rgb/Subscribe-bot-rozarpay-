@@ -1,15 +1,14 @@
 import os
 import telebot
-import urllib.parse
 import uuid
 import re
 import time
+import razorpay
 
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pymongo import MongoClient
 from datetime import datetime, timedelta
 from flask import Flask, request
-import razorpay
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 # ================= CONFIG =================
 
@@ -26,8 +25,9 @@ RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET")
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-client = MongoClient(MONGO_URI)
-db = client["sub_management"]
+mongo_client = MongoClient(MONGO_URI)
+
+db = mongo_client["sub_management"]
 
 users_col = db["users"]
 links_col = db["short_links"]
@@ -40,10 +40,10 @@ rz_client = razorpay.Client(
 # ================= PLANS =================
 
 PLANS = {
-    "2880": "50",      # 2 Days
-    "10080": "100",   # 7 Days
-    "43200": "250",   # 1 Month
-    "129600": "800"   # 3 Months
+    "2880": "50",
+    "10080": "100",
+    "43200": "250",
+    "129600": "800"
 }
 
 # ================= FLASK =================
@@ -56,16 +56,23 @@ def home():
 
 @app.route(f"/{BOT_TOKEN}", methods=["POST"])
 def telegram_webhook():
+
     if request.headers.get("content-type") == "application/json":
+
         json_string = request.get_data().decode("utf-8")
+
         update = telebot.types.Update.de_json(json_string)
+
         bot.process_new_updates([update])
+
         return "OK", 200
+
     return "Forbidden", 403
 
 # ================= HELPERS =================
 
 def is_prime(uid):
+
     user = users_col.find_one({"user_id": uid})
 
     if user and user.get("expiry", 0) > datetime.now().timestamp():
@@ -74,7 +81,20 @@ def is_prime(uid):
     return False
 
 def get_expiry_date(timestamp):
-    return datetime.fromtimestamp(timestamp).strftime("%d %b %Y, %I:%M %p")
+
+    return datetime.fromtimestamp(timestamp).strftime(
+        "%d %b %Y, %I:%M %p"
+    )
+
+# ================= USER ID =================
+
+@bot.message_handler(commands=["id"])
+def get_id(message):
+
+    bot.reply_to(
+        message,
+        f"🆔 Your Telegram ID:\n\n{message.from_user.id}"
+    )
 
 # ================= ADMIN COMMANDS =================
 
@@ -85,6 +105,7 @@ def stats_handler(message):
         return
 
     total_users = users_col.count_documents({})
+
     active_prime = users_col.count_documents({
         "expiry": {"$gt": datetime.now().timestamp()}
     })
@@ -93,7 +114,7 @@ def stats_handler(message):
 
     text = (
         f"📊 BOT STATS\n\n"
-        f"👤 Users: {total_users}\n"
+        f"👤 Total Users: {total_users}\n"
         f"👑 Prime Users: {active_prime}\n"
         f"🔗 Links: {total_links}"
     )
@@ -122,7 +143,11 @@ def save_link(message):
         "url": message.text
     })
 
-    short_url = f"https://t.me/{bot.get_me().username}?start=vid_{file_id}"
+    short_url = (
+        f"https://t.me/"
+        f"{bot.get_me().username}"
+        f"?start=vid_{file_id}"
+    )
 
     bot.send_message(
         ADMIN_ID,
@@ -151,6 +176,7 @@ def send_broadcast(message):
     for user in users:
 
         try:
+
             bot.copy_message(
                 user["user_id"],
                 ADMIN_ID,
@@ -158,6 +184,7 @@ def send_broadcast(message):
             )
 
             count += 1
+
             time.sleep(0.1)
 
         except:
@@ -181,7 +208,10 @@ def start_handler(message):
         upsert=True
     )
 
-    match = re.search(r"vid_([a-zA-Z0-9]+)", message.text)
+    match = re.search(
+        r"vid_([a-zA-Z0-9]+)",
+        message.text
+    )
 
     if match:
 
@@ -197,12 +227,17 @@ def start_handler(message):
 
                 bot.send_message(
                     uid,
-                    f"🍿 YOUR CONTENT\n\n{link_data['url']}",
+                    f"🍿 YOUR CONTENT\n\n"
+                    f"{link_data['url']}",
                     disable_web_page_preview=True
                 )
 
             else:
-                bot.send_message(uid, "❌ Link Not Found")
+
+                bot.send_message(
+                    uid,
+                    "❌ Link Not Found"
+                )
 
         else:
 
@@ -248,11 +283,14 @@ def start_handler(message):
 
         if is_prime(uid):
 
-            u = users_col.find_one({"user_id": uid})
+            u = users_col.find_one({
+                "user_id": uid
+            })
 
             text += (
-                f"👑 PRIME USER\n"
-                f"📅 Expiry:\n{get_expiry_date(u['expiry'])}"
+                f"👑 PRIME USER\n\n"
+                f"📅 Expiry:\n"
+                f"{get_expiry_date(u['expiry'])}"
             )
 
         else:
@@ -263,7 +301,9 @@ def start_handler(message):
 
 # ================= PAYMENT =================
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("pay_"))
+@bot.callback_query_handler(
+    func=lambda call: call.data.startswith("pay_")
+)
 def payment_handler(call):
 
     bot.answer_callback_query(call.id)
@@ -280,7 +320,7 @@ def payment_handler(call):
             "payment_capture": "1"
         })
 
-        pay_link = (
+        checkout_url = (
             f"https://api.razorpay.com/v1/checkout/embedded?"
             f"order_id={order['id']}"
         )
@@ -302,20 +342,21 @@ def payment_handler(call):
         markup.add(
             InlineKeyboardButton(
                 "💳 PAY NOW",
-                url=pay_link
+                url=checkout_url
             )
         )
 
         markup.add(
             InlineKeyboardButton(
                 "✅ I PAID",
-                callback_data=f"checkpay_{call.from_user.id}"
+                callback_data=f"paid_{call.from_user.id}"
             )
         )
 
         bot.send_message(
             call.message.chat.id,
-            f"💰 Amount: ₹{price}\n\nClick Below To Pay",
+            f"💰 Amount: ₹{price}\n\n"
+            f"Click Below To Pay",
             reply_markup=markup
         )
 
@@ -323,12 +364,14 @@ def payment_handler(call):
 
         bot.send_message(
             call.message.chat.id,
-            f"❌ Error:\n{str(e)}"
+            f"❌ ERROR:\n{str(e)}"
         )
 
-# ================= PAYMENT VERIFY =================
+# ================= VERIFY =================
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("checkpay_"))
+@bot.callback_query_handler(
+    func=lambda call: call.data.startswith("paid_")
+)
 def verify_payment(call):
 
     uid = int(call.data.split("_")[1])
@@ -361,7 +404,9 @@ def verify_payment(call):
 
         bot.send_message(
             uid,
-            f"✅ PAYMENT SUCCESS\n\n🍿 LINK:\n{link_data['url']}"
+            f"✅ PAYMENT SUCCESS\n\n"
+            f"🍿 LINK:\n"
+            f"{link_data['url']}"
         )
 
     else:
@@ -380,17 +425,18 @@ def verify_payment(call):
 try:
 
     bot.remove_webhook()
+
     time.sleep(1)
 
     bot.set_webhook(
         url=f"{WEBHOOK_URL}/{BOT_TOKEN}"
     )
 
-    print("Webhook Set ✅")
+    print("✅ Webhook Set Successfully")
 
 except Exception as e:
 
-    print("Webhook Error:", e)
+    print("❌ Webhook Error:", e)
 
 # ================= RUN =================
 
