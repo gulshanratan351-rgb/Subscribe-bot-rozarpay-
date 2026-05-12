@@ -3,7 +3,7 @@ import re
 import time
 import hmac
 import hashlib
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import telebot
 import razorpay
@@ -12,35 +12,31 @@ from pymongo import MongoClient
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 
-# ================= CONFIG CHECK =================
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-MONGO_URI = os.getenv("MONGO_URI")
-ADMIN_ID = os.getenv("ADMIN_ID")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+# ================= ENV =================
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+MONGO_URI = os.getenv("MONGO_URI", "").strip()
+ADMIN_ID = os.getenv("ADMIN_ID", "").strip()
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip().rstrip("/")
 
-RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID")
-RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET")
-RAZORPAY_WEBHOOK_SECRET = os.getenv("RAZORPAY_WEBHOOK_SECRET")
+RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID", "").strip()
+RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET", "").strip()
+RAZORPAY_WEBHOOK_SECRET = os.getenv("RAZORPAY_WEBHOOK_SECRET", "").strip()
 
-REQUIRED = {
-    "BOT_TOKEN": BOT_TOKEN,
-    "MONGO_URI": MONGO_URI,
-    "ADMIN_ID": ADMIN_ID,
-    "WEBHOOK_URL": WEBHOOK_URL,
-    "RAZORPAY_KEY_ID": RAZORPAY_KEY_ID,
-    "RAZORPAY_KEY_SECRET": RAZORPAY_KEY_SECRET,
-    "RAZORPAY_WEBHOOK_SECRET": RAZORPAY_WEBHOOK_SECRET,
-}
-
-missing = [k for k, v in REQUIRED.items() if not v]
-if missing:
-    raise Exception(f"Missing ENV variables: {', '.join(missing)}")
+if not BOT_TOKEN:
+    raise Exception("BOT_TOKEN missing")
+if not MONGO_URI:
+    raise Exception("MONGO_URI missing")
+if not ADMIN_ID:
+    raise Exception("ADMIN_ID missing")
+if not WEBHOOK_URL:
+    raise Exception("WEBHOOK_URL missing")
+if not RAZORPAY_KEY_ID:
+    raise Exception("RAZORPAY_KEY_ID missing")
+if not RAZORPAY_KEY_SECRET:
+    raise Exception("RAZORPAY_KEY_SECRET missing")
 
 ADMIN_ID = int(ADMIN_ID)
-WEBHOOK_URL = WEBHOOK_URL.rstrip("/")
 
-
-# ================= INIT =================
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="Markdown")
 rzp = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
 
@@ -51,6 +47,8 @@ links_col = db["short_links"]
 payments_col = db["payments"]
 
 app = Flask(__name__)
+
+BOT_USERNAME = bot.get_me().username
 
 
 # ================= PLANS =================
@@ -73,10 +71,9 @@ def is_prime(uid):
 
 def add_prime(uid, mins):
     user = users_col.find_one({"user_id": uid})
-    current_expiry = int(user.get("expiry", 0)) if user else 0
-
-    base_time = max(current_expiry, now_ts())
-    new_expiry = base_time + int(mins) * 60
+    old_expiry = int(user.get("expiry", 0)) if user else 0
+    base = max(old_expiry, now_ts())
+    new_expiry = base + int(mins) * 60
 
     users_col.update_one(
         {"user_id": uid},
@@ -84,22 +81,26 @@ def add_prime(uid, mins):
             "$set": {
                 "user_id": uid,
                 "expiry": new_expiry,
-                "updated_at": datetime.now(),
+                "updated_at": datetime.now()
             },
             "$setOnInsert": {
-                "joined": datetime.now(),
-            },
+                "joined": datetime.now()
+            }
         },
-        upsert=True,
+        upsert=True
     )
     return new_expiry
 
 
-def format_expiry(ts):
+def format_time(ts):
     return datetime.fromtimestamp(int(ts)).strftime("%d-%m-%Y %I:%M %p")
 
 
-def verify_razorpay_signature(body, signature):
+def verify_rzp(body, signature):
+    if not RAZORPAY_WEBHOOK_SECRET:
+        print("WARNING: RAZORPAY_WEBHOOK_SECRET missing, signature check skipped")
+        return True
+
     if not signature:
         return False
 
@@ -112,12 +113,10 @@ def verify_razorpay_signature(body, signature):
     return hmac.compare_digest(generated, signature)
 
 
-def create_razorpay_link(uid, mins, price, fid):
+def create_payment_link(uid, mins, price, fid):
     try:
-        amount_paise = int(price) * 100
-
         data = {
-            "amount": amount_paise,
+            "amount": int(price) * 100,
             "currency": "INR",
             "accept_partial": False,
             "description": f"Prime Access - {mins} minutes",
@@ -138,41 +137,29 @@ def create_razorpay_link(uid, mins, price, fid):
             "callback_method": "get"
         }
 
-        payment_link = rzp.payment_link.create(data)
-        return payment_link.get("short_url")
+        link = rzp.payment_link.create(data)
+        return link.get("short_url")
 
     except Exception as e:
-        print("Razorpay Link Error:", e)
+        print("Payment link error:", e)
         return None
 
 
-# ================= BOT USERNAME =================
-try:
-    BOT_USERNAME = bot.get_me().username
-except Exception as e:
-    raise Exception(f"Bot token wrong or Telegram error: {e}")
-
-
-# ================= FLASK ROUTES =================
+# ================= FLASK =================
 @app.route("/")
 def home():
-    return "🚀 Razorpay Telegram Bot Live", 200
+    return "OK Bot is running ✅", 200
 
 
 @app.route("/health")
 def health():
-    return {
-        "status": "ok",
-        "bot": BOT_USERNAME,
-        "time": datetime.now().isoformat()
-    }, 200
+    return "OK ✅", 200
 
 
 @app.route(f"/{BOT_TOKEN}", methods=["POST"])
 def telegram_webhook():
     if request.headers.get("content-type") == "application/json":
-        json_string = request.get_data().decode("utf-8")
-        update = telebot.types.Update.de_json(json_string)
+        update = telebot.types.Update.de_json(request.get_data().decode("utf-8"))
         bot.process_new_updates([update])
         return "OK", 200
 
@@ -184,25 +171,24 @@ def razorpay_webhook():
     body = request.get_data()
     signature = request.headers.get("X-Razorpay-Signature")
 
-    if not verify_razorpay_signature(body, signature):
-        print("Invalid Razorpay Signature")
+    if not verify_rzp(body, signature):
         return "Invalid signature", 400
 
     data = request.json or {}
 
     if data.get("event") != "payment_link.paid":
-        return "Ignored", 200
+        return "OK ignored", 200
 
     try:
         payment_link = data["payload"]["payment_link"]["entity"]
         payment = data["payload"]["payment"]["entity"]
 
         payment_id = payment.get("id")
+
         if payments_col.find_one({"payment_id": payment_id}):
             return "Already processed", 200
 
         notes = payment_link.get("notes", {})
-
         uid = int(notes.get("user_id"))
         mins = int(notes.get("mins"))
         fid = str(notes.get("file_id"))
@@ -214,50 +200,48 @@ def razorpay_webhook():
         payments_col.insert_one({
             "payment_id": payment_id,
             "user_id": uid,
+            "amount": amount,
             "mins": mins,
             "file_id": fid,
-            "amount": amount,
-            "created_at": datetime.now(),
-            "raw_status": payment.get("status")
+            "created_at": datetime.now()
         })
 
         link_data = links_col.find_one({"file_id": fid})
-        content_text = ""
+        content = ""
 
         if link_data:
-            content_text = f"\n\n🍿 *Your Content Link:*\n{link_data.get('url')}"
+            content = f"\n\n🍿 *Your Link:*\n{link_data.get('url')}"
 
         bot.send_message(
             uid,
             f"✅ *Payment Successful!*\n\n"
             f"Prime activated.\n"
-            f"Valid till: `{format_expiry(new_expiry)}`"
-            f"{content_text}",
+            f"Valid till: `{format_time(new_expiry)}`"
+            f"{content}",
             disable_web_page_preview=True
         )
 
         bot.send_message(
             ADMIN_ID,
-            f"💰 *Razorpay Payment Success*\n\n"
-            f"User ID: `{uid}`\n"
+            f"💰 *Payment Success*\n\n"
+            f"User: `{uid}`\n"
             f"Amount: ₹{amount}\n"
-            f"Plan: {mins // 1440} days\n"
             f"Payment ID: `{payment_id}`"
         )
 
     except Exception as e:
-        print("Webhook Processing Error:", e)
+        print("Razorpay webhook error:", e)
         try:
-            bot.send_message(ADMIN_ID, f"⚠️ Razorpay webhook error:\n`{e}`")
+            bot.send_message(ADMIN_ID, f"⚠️ Webhook error:\n`{e}`")
         except:
             pass
 
     return "OK", 200
 
 
-# ================= BOT COMMANDS =================
+# ================= BOT =================
 @bot.message_handler(commands=["start"])
-def start_cmd(message):
+def start(message):
     uid = message.from_user.id
 
     users_col.update_one(
@@ -285,7 +269,7 @@ def start_cmd(message):
         link_data = links_col.find_one({"file_id": fid})
 
         if not link_data:
-            bot.send_message(uid, "❌ Content link not found.")
+            bot.send_message(uid, "❌ Link not found.")
             return
 
         if is_prime(uid):
@@ -298,144 +282,61 @@ def start_cmd(message):
 
         markup = InlineKeyboardMarkup()
 
-        for mins, p in PLANS.items():
+        for mins, plan in PLANS.items():
             markup.add(
                 InlineKeyboardButton(
-                    f"💳 {p['name']} - ₹{p['price']}",
+                    f"💳 {plan['name']} - ₹{plan['price']}",
                     callback_data=f"pay|{fid}|{mins}"
                 )
             )
 
         bot.send_message(
             uid,
-            "🔒 *Subscription Required!*\n\n"
-            "Payment ke baad Prime automatically activate ho jayega.",
+            "🔒 *Subscription Required!*\n\nPlan select karo:",
             reply_markup=markup
         )
         return
 
     bot.send_message(
         uid,
-        "👋 Welcome!\n\n"
-        "Ye Razorpay auto subscription bot live hai.\n\n"
+        "👋 Bot working hai ✅\n\n"
         "Commands:\n"
-        "/myplan - apna plan check karo"
+        "/myplan - plan check\n\n"
+        "Admin:\n"
+        "/addlink fileid link"
     )
 
 
 @bot.message_handler(commands=["myplan"])
-def myplan_cmd(message):
+def myplan(message):
     uid = message.from_user.id
     user = users_col.find_one({"user_id": uid})
 
     if not user or int(user.get("expiry", 0)) <= now_ts():
-        bot.send_message(uid, "❌ Aapka Prime active nahi hai.")
+        bot.send_message(uid, "❌ Prime active nahi hai.")
         return
 
     bot.send_message(
         uid,
-        f"✅ *Prime Active*\n\nValid till: `{format_expiry(user.get('expiry'))}`"
+        f"✅ *Prime Active*\n\nValid till: `{format_time(user.get('expiry'))}`"
     )
 
 
 @bot.message_handler(commands=["addlink"])
-def addlink_cmd(message):
+def addlink(message):
     if message.from_user.id != ADMIN_ID:
         bot.send_message(message.chat.id, "❌ Admin only.")
         return
 
-    try:
-        parts = message.text.split(" ", 2)
+    parts = message.text.split(" ", 2)
 
-        if len(parts) < 3:
-            bot.send_message(
-                message.chat.id,
-                "Use:\n`/addlink fileid https://example.com/video`"
-            )
-            return
+    if len(parts) < 3:
+        bot.send_message(message.chat.id, "Use:\n`/addlink movie1 https://example.com/video`")
+        return
 
-        fid = parts[1].strip()
-        url = parts[2].strip()
+    fid = parts[1].strip()
+    url = parts[2].strip()
 
-        links_col.update_one(
-            {"file_id": fid},
-            {
-                "$set": {
-                    "file_id": fid,
-                    "url": url,
-                    "created_at": datetime.now()
-                }
-            },
-            upsert=True
-        )
-
-        start_link = f"https://t.me/{BOT_USERNAME}?start=vid_{fid}"
-
-        bot.send_message(
-            message.chat.id,
-            f"✅ Link added!\n\n"
-            f"*User Start Link:*\n{start_link}",
-            disable_web_page_preview=True
-        )
-
-    except Exception as e:
-        bot.send_message(message.chat.id, f"Error: `{e}`")
-
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("pay|"))
-def payment_callback(call):
-    try:
-        bot.answer_callback_query(call.id, "Generating payment link...")
-
-        _, fid, mins = call.data.split("|")
-        uid = call.from_user.id
-
-        plan = PLANS.get(mins)
-        if not plan:
-            bot.send_message(uid, "❌ Invalid plan.")
-            return
-
-        pay_url = create_razorpay_link(
-            uid=uid,
-            mins=int(mins),
-            price=plan["price"],
-            fid=fid
-        )
-
-        if not pay_url:
-            bot.send_message(uid, "⚠️ Razorpay link create nahi hua. Admin se contact karo.")
-            return
-
-        markup = InlineKeyboardMarkup()
-        markup.add(InlineKeyboardButton("🚀 Pay with Razorpay", url=pay_url))
-
-        bot.send_message(
-            uid,
-            f"💰 *Amount:* ₹{plan['price']}\n"
-            f"📦 *Plan:* {plan['name']}\n\n"
-            f"Payment successful hote hi Prime automatic activate ho jayega.",
-            reply_markup=markup
-        )
-
-    except Exception as e:
-        print("Callback error:", e)
-        bot.send_message(call.from_user.id, "⚠️ Error. Please try again.")
-
-
-# ================= RUN =================
-if __name__ == "__main__":
-    print("Bot username:", BOT_USERNAME)
-
-    bot.remove_webhook()
-    time.sleep(1)
-
-    webhook_url = f"{WEBHOOK_URL}/{BOT_TOKEN}"
-    bot.set_webhook(url=webhook_url)
-
-    print("Telegram webhook set:", webhook_url)
-    print("Razorpay webhook URL:", f"{WEBHOOK_URL}/razorpay_webhook")
-
-    app.run(
-        host="0.0.0.0",
-        port=int(os.environ.get("PORT", 5000))
-    )
+    links_col.update_one(
+        {"file_id": fid},
+        {
