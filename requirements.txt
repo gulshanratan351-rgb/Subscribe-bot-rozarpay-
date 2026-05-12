@@ -1,5 +1,6 @@
-pyTelegramBotAPI==4.26.0
-pymongo==4.10.1
-Flask==3.0.3
-razorpay==1.4.2
-gunicorn==23.0.0
+pyTelegramBotAPI
+pymongo
+flask
+gunicorn
+razorpay
+setuptools
