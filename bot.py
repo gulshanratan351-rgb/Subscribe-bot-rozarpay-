@@ -4,7 +4,6 @@ from pymongo import MongoClient
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 import razorpay
-import requests
 
 # ================= CONFIG =================
 BOT_TOKEN = os.getenv('BOT_TOKEN')
@@ -23,7 +22,6 @@ orders_col = db['orders']
 
 razorpay_client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
 
-# Plans
 PLANS = {
     "2880": 50,
     "10080": 100,
@@ -63,27 +61,24 @@ def razorpay_webhook():
             
             order = orders_col.find_one({"order_id": order_id})
             if order:
-                # Activate subscription
                 expiry = int((datetime.now() + timedelta(minutes=int(order['mins']))).timestamp())
                 users_col.update_one({"user_id": order['user_id']}, {"$set": {"expiry": expiry}}, upsert=True)
                 
-                # Send content
                 link = links_col.find_one({"file_id": order['fid']})
                 if link:
                     try:
-                        bot.send_message(order['user_id'], f"✅ **Payment Successful!**\n\n🎬 **Your Content:**\n{link['url']}")
+                        bot.send_message(order['user_id'], f"✅ Payment Successful!\n\n🎬 Your Content:\n{link['url']}")
                     except:
                         pass
                 
                 orders_col.delete_one({"order_id": order_id})
-                bot.send_message(ADMIN_ID, f"✅ Payment Auto-Approved!\nUser: {order['user_id']}\nAmount: ₹{order['amount']}")
+                bot.send_message(ADMIN_ID, f"✅ Auto-Approved!\nUser: {order['user_id']}\nAmount: ₹{order['amount']}")
         
         return jsonify({"status": "ok"})
     except Exception as e:
         print(f"Webhook error: {str(e)}")
         return jsonify({"status": "error"}), 200
 
-# ================= HELPERS =================
 def is_prime(uid):
     user = users_col.find_one({"user_id": uid})
     return user and user.get('expiry', 0) > datetime.now().timestamp()
@@ -94,7 +89,7 @@ def stats(m):
     total = users_col.count_documents({})
     active = users_col.count_documents({"expiry": {"$gt": datetime.now().timestamp()}})
     links = links_col.count_documents({})
-    bot.reply_to(m, f"📊 **Bot Statistics**\n\n👤 Total Users: {total}\n👑 Active Prime: {active}\n🔗 Total Links: {links}")
+    bot.reply_to(m, f"📊 Bot Statistics\n\n👤 Total Users: {total}\n👑 Active Prime: {active}\n🔗 Total Links: {links}")
 
 @bot.message_handler(commands=['approve'], func=lambda m: m.from_user.id == ADMIN_ID)
 def approve(m):
@@ -150,7 +145,7 @@ def save_link(m):
     fid = str(uuid.uuid4())[:8]
     links_col.insert_one({"file_id": fid, "url": m.text})
     link_url = f"https://t.me/{bot.get_me().username}?start={fid}"
-    bot.send_message(ADMIN_ID, f"✅ **Link Created!**\n\n{link_url}")
+    bot.send_message(ADMIN_ID, f"✅ Link Created!\n\n{link_url}")
 
 # ================= USER =================
 @bot.message_handler(commands=['start'])
@@ -160,14 +155,13 @@ def start(m):
     
     text = m.text.split()
     
-    # Agar link ke saath aaya hai
     if len(text) > 1:
         fid = text[1]
         
         if is_prime(uid):
             link = links_col.find_one({"file_id": fid})
             if link:
-                bot.send_message(uid, f"🍿 **Your Content:**\n\n{link['url']}", disable_web_page_preview=True)
+                bot.send_message(uid, f"🍿 Your Content:\n\n{link['url']}", disable_web_page_preview=True)
             else:
                 bot.send_message(uid, "❌ Link not found")
         else:
@@ -177,15 +171,14 @@ def start(m):
             markup.row(InlineKeyboardButton("💳 1 Month - ₹250", callback_data=f"pay_{fid}_43200"))
             markup.row(InlineKeyboardButton("💳 3 Months - ₹650", callback_data=f"pay_{fid}_129600"))
             
-            bot.send_message(uid, "🔒 **Membership Required!**\n\nSelect your plan to unlock content:", reply_markup=markup)
+            bot.send_message(uid, "🔒 Membership Required!\n\nSelect your plan to unlock content:", reply_markup=markup)
     else:
-        # Welcome message
         if is_prime(uid):
             user = users_col.find_one({"user_id": uid})
             expiry_date = datetime.fromtimestamp(user['expiry']).strftime('%d %b %Y, %I:%M %p')
-            bot.send_message(uid, f"👋 **Welcome Back!**\n\n✅ Status: Prime Active\n📅 Expiry: {expiry_date}")
+            bot.send_message(uid, f"👋 Welcome Back!\n\n✅ Status: Prime Active\n📅 Expiry: {expiry_date}")
         else:
-            bot.send_message(uid, "👋 **Welcome!**\n\n💎 Get Prime membership to access exclusive content.\n\nUse /start [link] to unlock content.")
+            bot.send_message(uid, "👋 Welcome!\n\n💎 Get Prime membership to access exclusive content.\n\nUse /start [link] to unlock content.")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('pay_'))
 def create_payment(call):
@@ -195,7 +188,6 @@ def create_payment(call):
         _, fid, mins = call.data.split('_')
         amount = PLANS[mins]
         
-        # Create Razorpay Order
         order_data = {
             'amount': int(amount * 100),
             'currency': 'INR',
@@ -206,7 +198,6 @@ def create_payment(call):
         order = razorpay_client.order.create(data=order_data)
         order_id = order['id']
         
-        # Save to database
         orders_col.insert_one({
             "order_id": order_id,
             "user_id": call.from_user.id,
@@ -216,27 +207,26 @@ def create_payment(call):
             "created_at": datetime.now()
         })
         
-        # Create payment page link
         payment_link = f"https://rzp.io/l/{order_id[:8]}"
         
         markup = InlineKeyboardMarkup()
         markup.add(InlineKeyboardButton("💳 Pay with Razorpay", url=payment_link))
         markup.add(InlineKeyboardButton("🔄 Check Payment Status", callback_data=f"check_{order_id}"))
         
+        # NO MARKDOWN - Plain text only
         bot.send_message(
             call.message.chat.id,
-            f"💰 **Plan:** {PLAN_NAMES[mins]}\n"
-            f"💵 **Amount:** ₹{amount}\n\n"
-            f"🔗 **Payment Link:**\n{payment_link}\n\n"
-            f"✅ After payment, click **Check Payment Status** or wait 10 seconds for auto-approval.\n\n"
-            f"🆔 Order ID: `{order_id[:12]}`",
+            f"💰 Plan: {PLAN_NAMES[mins]}\n"
+            f"💵 Amount: ₹{amount}\n\n"
+            f"🔗 Payment Link:\n{payment_link}\n\n"
+            f"✅ After payment, click Check Payment Status button below.\n\n"
+            f"Order ID: {order_id[:12]}",
             reply_markup=markup,
-            parse_mode="Markdown",
             disable_web_page_preview=True
         )
         
     except Exception as e:
-        bot.send_message(call.message.chat.id, f"❌ **Error creating payment!**\n\n{str(e)}\n\nPlease try again or contact @admin")
+        bot.send_message(call.message.chat.id, f"❌ Error creating payment!\n\n{str(e)}\n\nPlease try again or contact admin.")
         bot.send_message(ADMIN_ID, f"Payment Error for user {call.from_user.id}:\n{str(e)}")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('check_'))
@@ -251,13 +241,11 @@ def check_payment(call):
         return
     
     try:
-        # Fetch payment status
         payments = razorpay_client.order.payments(order_id)
         
         if payments and payments.get('items'):
             for payment in payments['items']:
                 if payment['status'] == 'captured':
-                    # Activate user
                     expiry = int((datetime.now() + timedelta(minutes=int(order['mins']))).timestamp())
                     users_col.update_one(
                         {"user_id": order['user_id']},
@@ -265,24 +253,22 @@ def check_payment(call):
                         upsert=True
                     )
                     
-                    # Send content
                     link = links_col.find_one({"file_id": order['fid']})
                     if link:
-                        bot.send_message(call.message.chat.id, f"✅ **Payment Verified!**\n\n🎬 **Your Content:**\n{link['url']}")
+                        bot.send_message(call.message.chat.id, f"✅ Payment Verified!\n\n🎬 Your Content:\n{link['url']}")
                     else:
-                        bot.send_message(call.message.chat.id, f"✅ **Payment Verified!**\n\n{PLAN_NAMES[order['mins']]} subscription activated!")
+                        bot.send_message(call.message.chat.id, f"✅ Payment Verified!\n\n{PLAN_NAMES[order['mins']]} subscription activated!")
                     
                     orders_col.delete_one({"order_id": order_id})
-                    bot.send_message(ADMIN_ID, f"✅ Payment verified manually!\nUser: {order['user_id']}")
+                    bot.send_message(ADMIN_ID, f"✅ Manual verification!\nUser: {order['user_id']}")
                     return
         
         bot.send_message(
             call.message.chat.id,
-            f"⏳ **Payment Pending**\n\n"
-            f"Order ID: `{order_id[:12]}`\n"
+            f"⏳ Payment Pending\n\n"
+            f"Order ID: {order_id[:12]}\n"
             f"Amount: ₹{order['amount']}\n\n"
-            f"Please complete payment using the link below:\n"
-            f"https://rzp.io/l/{order_id[:8]}"
+            f"Please complete payment using:\nhttps://rzp.io/l/{order_id[:8]}"
         )
         
     except Exception as e:
