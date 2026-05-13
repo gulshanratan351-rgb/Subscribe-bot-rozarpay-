@@ -1,12 +1,12 @@
-import os, telebot, uuid, re, time, hashlib, hmac, json
+import os, telebot, uuid, re, time, json, random, string
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pymongo import MongoClient
 from datetime import datetime, timedelta
-from flask import Flask, request, jsonify
+from flask import Flask, request
 import razorpay
 import requests
 
-# ================= CONFIG =================
+# Config
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 MONGO_URI = os.getenv('MONGO_URI')
 ADMIN_ID = int(os.getenv('ADMIN_ID'))
@@ -25,106 +25,107 @@ razorpay_client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
 
 # Plans
 PLANS = {
-    "2880": 50,
-    "10080": 100,
-    "43200": 250,
-    "129600": 650
+    "2days": {"price": 50, "minutes": 2880, "name": "2 Days"},
+    "7days": {"price": 100, "minutes": 10080, "name": "7 Days"},
+    "1month": {"price": 250, "minutes": 43200, "name": "1 Month"},
+    "3months": {"price": 650, "minutes": 129600, "name": "3 Months"}
 }
 
-PLAN_NAMES = {
-    "2880": "2 Days",
-    "10080": "7 Days",
-    "43200": "1 Month",
-    "129600": "3 Months"
-}
+def generate_short_id(length=8):
+    """Generate random short ID like B2r2UlWl"""
+    chars = string.ascii_letters + string.digits
+    return ''.join(random.choices(chars, k=length))
 
 app = Flask(__name__)
 
-# ================= WEBHOOKS =================
 @app.route('/')
 def home():
     return "Bot Running"
 
-@app.route(f"/{BOT_TOKEN}", methods=['POST'])
+@app.route(f'/{BOT_TOKEN}', methods=['POST'])
 def webhook():
     if request.headers.get('content-type') == 'application/json':
-        bot.process_new_updates([telebot.types.Update.de_json(request.get_data().decode())])
-        return "OK", 200
-    return "Forbidden", 403
+        update = telebot.types.Update.de_json(request.get_data().decode())
+        bot.process_new_updates([update])
+        return 'OK', 200
+    return 'Forbidden', 403
 
 @app.route('/razorpay-webhook', methods=['POST'])
-def razorpay_webhook():
+def payment_webhook():
     try:
         data = json.loads(request.get_data().decode())
-        
         if data.get('event') == 'payment.captured':
             payment = data['payload']['payment']['entity']
-            order_id = payment['order_id']
+            razorpay_order_id = payment['order_id']
             
-            order = orders_col.find_one({"order_id": order_id})
+            # Find order by razorpay_order_id
+            order = orders_col.find_one({"razorpay_order_id": razorpay_order_id})
             if order:
-                expiry = int((datetime.now() + timedelta(minutes=int(order['mins']))).timestamp())
-                users_col.update_one({"user_id": order['user_id']}, {"$set": {"expiry": expiry}}, upsert=True)
+                # Activate user
+                expiry_time = int((datetime.now() + timedelta(minutes=order['minutes'])).timestamp())
+                users_col.update_one(
+                    {"user_id": order['user_id']},
+                    {"$set": {"expiry": expiry_time}},
+                    upsert=True
+                )
                 
-                link = links_col.find_one({"file_id": order['fid']})
+                # Send content
+                link = links_col.find_one({"file_id": order['file_id']})
                 if link:
-                    try:
-                        bot.send_message(order['user_id'], f"✅ Payment Successful!\n\n🎬 Your Content:\n{link['url']}")
-                    except:
-                        pass
+                    bot.send_message(order['user_id'], f"✅ Payment Successful!\n\n🎬 Your Content:\n{link['url']}")
                 
-                orders_col.delete_one({"order_id": order_id})
-                bot.send_message(ADMIN_ID, f"✅ Auto-Approved!\nUser: {order['user_id']}\nAmount: ₹{order['amount']}")
-        
-        return jsonify({"status": "ok"})
+                # Cleanup
+                orders_col.delete_one({"_id": order['_id']})
+                bot.send_message(ADMIN_ID, f"✅ Auto-Approved: User {order['user_id']}")
     except Exception as e:
-        print(f"Webhook error: {str(e)}")
-        return jsonify({"status": "error"}), 200
+        print(f"Webhook error: {e}")
+    return 'OK', 200
 
-def is_prime(uid):
-    user = users_col.find_one({"user_id": uid})
+def is_prime(user_id):
+    user = users_col.find_one({"user_id": user_id})
     return user and user.get('expiry', 0) > datetime.now().timestamp()
 
-# ================= ADMIN =================
+# Admin Commands
 @bot.message_handler(commands=['stats'], func=lambda m: m.from_user.id == ADMIN_ID)
 def stats(m):
     total = users_col.count_documents({})
     active = users_col.count_documents({"expiry": {"$gt": datetime.now().timestamp()}})
     links = links_col.count_documents({})
-    bot.reply_to(m, f"📊 Bot Statistics\n\n👤 Total Users: {total}\n👑 Active Prime: {active}\n🔗 Total Links: {links}")
+    bot.reply_to(m, f"📊 Stats:\nUsers: {total}\nActive: {active}\nLinks: {links}")
 
 @bot.message_handler(commands=['approve'], func=lambda m: m.from_user.id == ADMIN_ID)
 def approve(m):
     try:
-        parts = m.text.split()
-        if len(parts) < 3:
-            bot.reply_to(m, "❌ Use: /approve user_id days")
-            return
-        uid = int(parts[1])
-        days = int(parts[2])
-        expiry = int((datetime.now() + timedelta(days=days)).timestamp())
-        users_col.update_one({"user_id": uid}, {"$set": {"expiry": expiry}}, upsert=True)
-        bot.send_message(uid, f"✅ Prime activated for {days} days by Admin!")
-        bot.reply_to(m, f"✅ User {uid} approved for {days} days")
-    except Exception as e:
-        bot.reply_to(m, f"❌ Error: {str(e)}")
+        _, uid, days = m.text.split()
+        expiry = int((datetime.now() + timedelta(days=int(days))).timestamp())
+        users_col.update_one({"user_id": int(uid)}, {"$set": {"expiry": expiry}}, upsert=True)
+        bot.send_message(int(uid), f"✅ Prime activated for {days} days")
+        bot.reply_to(m, f"✅ User {uid} approved")
+    except:
+        bot.reply_to(m, "Use: /approve user_id days")
 
 @bot.message_handler(commands=['unapprove'], func=lambda m: m.from_user.id == ADMIN_ID)
 def unapprove(m):
     try:
-        uid = None
-        if m.reply_to_message:
-            uid = m.reply_to_message.from_user.id
-        else:
-            uid = int(m.text.split()[1])
+        uid = int(m.text.split()[1]) if len(m.text.split()) > 1 else m.reply_to_message.from_user.id
         users_col.update_one({"user_id": uid}, {"$set": {"expiry": 0}})
         bot.reply_to(m, f"✅ User {uid} deactivated")
     except:
-        bot.reply_to(m, "❌ Use: /unapprove user_id")
+        bot.reply_to(m, "Use: /unapprove user_id")
+
+@bot.message_handler(commands=['short'], func=lambda m: m.from_user.id == ADMIN_ID)
+def short(m):
+    msg = bot.reply_to(m, "Send link to shorten:")
+    bot.register_next_step_handler(msg, save_link)
+
+def save_link(m):
+    file_id = str(uuid.uuid4())[:8]
+    links_col.insert_one({"file_id": file_id, "url": m.text})
+    bot.send_message(ADMIN_ID, f"✅ Link: https://t.me/{bot.get_me().username}?start={file_id}")
 
 @bot.message_handler(commands=['broadcast'], func=lambda m: m.from_user.id == ADMIN_ID)
 def broadcast(m):
-    msg = bot.send_message(ADMIN_ID, "📢 Send message to broadcast:")
+    msg = bot.send_message(ADMIN_ID, "Send message to broadcast:")
     bot.register_next_step_handler(msg, do_broadcast)
 
 def do_broadcast(m):
@@ -133,158 +134,156 @@ def do_broadcast(m):
         try:
             bot.copy_message(user['user_id'], ADMIN_ID, m.message_id)
             count += 1
-            time.sleep(0.05)
+            time.sleep(0.1)
         except:
             pass
-    bot.send_message(ADMIN_ID, f"✅ Broadcast sent to {count} users")
+    bot.send_message(ADMIN_ID, f"✅ Sent to {count} users")
 
-@bot.message_handler(commands=['short'], func=lambda m: m.from_user.id == ADMIN_ID)
-def short(m):
-    msg = bot.reply_to(m, "🔗 Send the link to shorten:")
-    bot.register_next_step_handler(msg, save_link)
-
-def save_link(m):
-    fid = str(uuid.uuid4())[:8]
-    links_col.insert_one({"file_id": fid, "url": m.text})
-    link_url = f"https://t.me/{bot.get_me().username}?start={fid}"
-    bot.send_message(ADMIN_ID, f"✅ Link Created!\n\n{link_url}")
-
-# ================= USER =================
+# User Commands
 @bot.message_handler(commands=['start'])
 def start(m):
-    uid = m.from_user.id
-    users_col.update_one({"user_id": uid}, {"$setOnInsert": {"joined": datetime.now()}}, upsert=True)
+    user_id = m.from_user.id
+    users_col.update_one({"user_id": user_id}, {"$setOnInsert": {"joined": datetime.now()}}, upsert=True)
     
-    text = m.text.split()
-    
-    if len(text) > 1:
-        fid = text[1]
+    parts = m.text.split()
+    if len(parts) > 1:
+        file_id = parts[1]
         
-        if is_prime(uid):
-            link = links_col.find_one({"file_id": fid})
+        if is_prime(user_id):
+            link = links_col.find_one({"file_id": file_id})
             if link:
-                bot.send_message(uid, f"🍿 Your Content:\n\n{link['url']}", disable_web_page_preview=True)
+                bot.send_message(user_id, link['url'])
             else:
-                bot.send_message(uid, "❌ Link not found")
+                bot.send_message(user_id, "❌ Link not found")
         else:
-            markup = InlineKeyboardMarkup()
-            markup.row(InlineKeyboardButton("💳 2 Days - ₹50", callback_data=f"pay_{fid}_2880"))
-            markup.row(InlineKeyboardButton("💳 7 Days - ₹100", callback_data=f"pay_{fid}_10080"))
-            markup.row(InlineKeyboardButton("💳 1 Month - ₹250", callback_data=f"pay_{fid}_43200"))
-            markup.row(InlineKeyboardButton("💳 3 Months - ₹650", callback_data=f"pay_{fid}_129600"))
-            
-            bot.send_message(uid, "🔒 Membership Required!\n\nSelect your plan to unlock content:", reply_markup=markup)
+            # Show payment options
+            markup = InlineKeyboardMarkup(row_width=2)
+            markup.add(
+                InlineKeyboardButton("2 Days - ₹50", callback_data=f"pay_{file_id}_2days"),
+                InlineKeyboardButton("7 Days - ₹100", callback_data=f"pay_{file_id}_7days"),
+                InlineKeyboardButton("1 Month - ₹250", callback_data=f"pay_{file_id}_1month"),
+                InlineKeyboardButton("3 Months - ₹650", callback_data=f"pay_{file_id}_3months")
+            )
+            bot.send_message(user_id, "🔒 Prime Required!\nSelect a plan:", reply_markup=markup)
     else:
-        if is_prime(uid):
-            user = users_col.find_one({"user_id": uid})
-            expiry_date = datetime.fromtimestamp(user['expiry']).strftime('%d %b %Y, %I:%M %p')
-            bot.send_message(uid, f"👋 Welcome Back!\n\n✅ Status: Prime Active\n📅 Expiry: {expiry_date}")
+        if is_prime(user_id):
+            user = users_col.find_one({"user_id": user_id})
+            expiry_date = datetime.fromtimestamp(user['expiry']).strftime('%d %b %Y')
+            bot.send_message(user_id, f"✅ Prime Active till {expiry_date}")
         else:
-            bot.send_message(uid, "👋 Welcome!\n\n💎 Get Prime membership to access exclusive content.\n\nUse /start [link] to unlock content.")
+            bot.send_message(user_id, "👋 Welcome!\nBuy Prime to access content.")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('pay_'))
-def create_payment(call):
+def handle_payment(call):
     bot.answer_callback_query(call.id)
     
     try:
-        _, fid, mins = call.data.split('_')
-        amount = PLANS[mins]
+        _, file_id, plan_key = call.data.split('_')
+        plan = PLANS[plan_key]
         
         # Create Razorpay Order
-        order_data = {
-            'amount': int(amount * 100),
+        razorpay_order = razorpay_client.order.create({
+            'amount': plan['price'] * 100,
             'currency': 'INR',
-            'receipt': f'receipt_{call.from_user.id}_{int(time.time())}',
+            'receipt': f"{call.from_user.id}_{int(time.time())}",
             'payment_capture': 1
-        }
+        })
         
-        order = razorpay_client.order.create(data=order_data)
-        order_id = order['id']
+        # Generate short ID like B2r2UlWl
+        short_id = generate_short_id()
         
         # Save to database
         orders_col.insert_one({
-            "order_id": order_id,
+            "short_id": short_id,  # Store short ID
+            "razorpay_order_id": razorpay_order['id'],  # Store original order ID too
             "user_id": call.from_user.id,
-            "fid": fid,
-            "mins": mins,
-            "amount": amount,
+            "file_id": file_id,
+            "minutes": plan['minutes'],
+            "amount": plan['price'],
+            "plan_name": plan['name'],
             "created_at": datetime.now()
         })
         
-        # FIXED: Working payment link format like https://rzp.io/rzp/B2r2UlWl
-        payment_link = f"https://rzp.io/rzp/{order_id}"
+        # CREATE WORKING LINK LIKE https://rzp.io/rzp/B2r2UlWl
+        payment_link = f"https://rzp.io/rzp/{short_id}"
         
         markup = InlineKeyboardMarkup()
-        markup.add(InlineKeyboardButton("💳 Pay with Razorpay", url=payment_link))
-        markup.add(InlineKeyboardButton("🔄 Check Payment Status", callback_data=f"check_{order_id}"))
+        markup.add(InlineKeyboardButton("💳 Pay Now", url=payment_link))
+        markup.add(InlineKeyboardButton("✓ Check Payment", callback_data=f"check_{short_id}"))
         
         bot.send_message(
             call.message.chat.id,
-            f"💰 Plan: {PLAN_NAMES[mins]}\n"
-            f"💵 Amount: ₹{amount}\n\n"
-            f"🔗 Click below to pay:\n{payment_link}\n\n"
-            f"✅ After payment, click Check Payment Status",
+            f"💰 Plan: {plan['name']}\n"
+            f"💵 Amount: ₹{plan['price']}\n\n"
+            f"🔗 Payment Link:\n{payment_link}\n\n"
+            f"✅ Click Pay Now, complete payment, then click 'Check Payment'",
             reply_markup=markup,
             disable_web_page_preview=True
         )
         
+        # Also send admin notification
+        bot.send_message(ADMIN_ID, f"New order: {short_id} - ₹{plan['price']} - User: {call.from_user.id}")
+        
     except Exception as e:
-        bot.send_message(call.message.chat.id, f"❌ Error creating payment!\n\n{str(e)}\n\nPlease try again.")
-        bot.send_message(ADMIN_ID, f"Payment Error: {str(e)}")
+        bot.send_message(call.message.chat.id, f"❌ Error: {str(e)[:100]}")
+        bot.send_message(ADMIN_ID, f"Payment error: {str(e)}")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('check_'))
 def check_payment(call):
-    bot.answer_callback_query(call.id, "Checking payment status...")
+    bot.answer_callback_query(call.id)
     
-    order_id = call.data.split('_')[1]
-    order = orders_col.find_one({"order_id": order_id})
+    short_id = call.data.split('_')[1]
+    order = orders_col.find_one({"short_id": short_id})
     
     if not order:
-        bot.send_message(call.message.chat.id, "❌ Order not found! Please create a new order.")
+        bot.send_message(call.message.chat.id, "❌ Order not found!")
         return
     
     try:
-        # Fetch payment status
-        payments = razorpay_client.order.payments(order_id)
+        # Get payments for this order using razorpay_order_id
+        payments = razorpay_client.order.payments(order['razorpay_order_id'])
         
-        if payments and payments.get('items'):
-            for payment in payments['items']:
-                if payment['status'] == 'captured':
-                    # Activate user
-                    expiry = int((datetime.now() + timedelta(minutes=int(order['mins']))).timestamp())
-                    users_col.update_one(
-                        {"user_id": order['user_id']},
-                        {"$set": {"expiry": expiry, "payment_id": payment['id']}},
-                        upsert=True
-                    )
-                    
-                    # Send content
-                    link = links_col.find_one({"file_id": order['fid']})
-                    if link:
-                        bot.send_message(call.message.chat.id, f"✅ Payment Verified!\n\n🎬 Your Content:\n{link['url']}")
-                    else:
-                        bot.send_message(call.message.chat.id, f"✅ Payment Verified!\n\n{PLAN_NAMES[order['mins']]} subscription activated!")
-                    
-                    orders_col.delete_one({"order_id": order_id})
-                    bot.send_message(ADMIN_ID, f"✅ Manual verification!\nUser: {order['user_id']}")
-                    return
+        for payment in payments.get('items', []):
+            if payment['status'] == 'captured':
+                # Activate user
+                expiry = int((datetime.now() + timedelta(minutes=order['minutes'])).timestamp())
+                users_col.update_one(
+                    {"user_id": order['user_id']},
+                    {"$set": {"expiry": expiry, "payment_id": payment['id']}},
+                    upsert=True
+                )
+                
+                # Send content
+                link = links_col.find_one({"file_id": order['file_id']})
+                if link:
+                    bot.send_message(call.message.chat.id, f"✅ Payment Verified!\n\n🎬 {link['url']}")
+                else:
+                    bot.send_message(call.message.chat.id, "✅ Payment Verified!\nSubscription activated.")
+                
+                orders_col.delete_one({"_id": order['_id']})
+                bot.send_message(ADMIN_ID, f"✅ Manual verify: {order['user_id']} - {order['plan_name']}")
+                return
         
-        bot.send_message(
-            call.message.chat.id,
-            f"⏳ Payment Pending\n\n"
-            f"Order ID: {order_id[:12]}\n"
-            f"Amount: ₹{order['amount']}\n\n"
-            f"Please complete payment using:\nhttps://rzp.io/rzp/{order_id}"
-        )
+        bot.send_message(call.message.chat.id, f"⏳ Payment pending.\nComplete payment first.\nLink: https://rzp.io/rzp/{short_id}")
         
     except Exception as e:
-        bot.send_message(call.message.chat.id, f"❌ Error checking payment:\n{str(e)}")
+        bot.send_message(call.message.chat.id, f"❌ Check failed: {str(e)[:100]}")
 
-# ================= RUN =================
+# Keep alive (for Render)
+import threading
+def keep_alive():
+    while True:
+        time.sleep(300)
+        try:
+            requests.get(WEBHOOK_URL)
+        except:
+            pass
+
 if __name__ == '__main__':
-    print("🚀 Bot Starting...")
+    # Start keep alive thread
+    threading.Thread(target=keep_alive, daemon=True).start()
+    
     bot.remove_webhook()
-    time.sleep(2)
+    time.sleep(1)
     bot.set_webhook(url=f"{WEBHOOK_URL}/{BOT_TOKEN}")
-    print(f"✅ Webhook set to: {WEBHOOK_URL}/{BOT_TOKEN}")
-    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
