@@ -4,6 +4,7 @@ from pymongo import MongoClient
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 import razorpay
+import requests
 
 # ================= CONFIG =================
 BOT_TOKEN = os.getenv('BOT_TOKEN')
@@ -22,6 +23,7 @@ orders_col = db['orders']
 
 razorpay_client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
 
+# Plans
 PLANS = {
     "2880": 50,
     "10080": 100,
@@ -188,6 +190,7 @@ def create_payment(call):
         _, fid, mins = call.data.split('_')
         amount = PLANS[mins]
         
+        # Create Razorpay Order
         order_data = {
             'amount': int(amount * 100),
             'currency': 'INR',
@@ -198,6 +201,7 @@ def create_payment(call):
         order = razorpay_client.order.create(data=order_data)
         order_id = order['id']
         
+        # Save to database
         orders_col.insert_one({
             "order_id": order_id,
             "user_id": call.from_user.id,
@@ -207,27 +211,26 @@ def create_payment(call):
             "created_at": datetime.now()
         })
         
-        payment_link = f"https://rzp.io/l/{order_id[:8]}"
+        # FIXED: Working payment link format like https://rzp.io/rzp/B2r2UlWl
+        payment_link = f"https://rzp.io/rzp/{order_id}"
         
         markup = InlineKeyboardMarkup()
         markup.add(InlineKeyboardButton("💳 Pay with Razorpay", url=payment_link))
         markup.add(InlineKeyboardButton("🔄 Check Payment Status", callback_data=f"check_{order_id}"))
         
-        # NO MARKDOWN - Plain text only
         bot.send_message(
             call.message.chat.id,
             f"💰 Plan: {PLAN_NAMES[mins]}\n"
             f"💵 Amount: ₹{amount}\n\n"
-            f"🔗 Payment Link:\n{payment_link}\n\n"
-            f"✅ After payment, click Check Payment Status button below.\n\n"
-            f"Order ID: {order_id[:12]}",
+            f"🔗 Click below to pay:\n{payment_link}\n\n"
+            f"✅ After payment, click Check Payment Status",
             reply_markup=markup,
             disable_web_page_preview=True
         )
         
     except Exception as e:
-        bot.send_message(call.message.chat.id, f"❌ Error creating payment!\n\n{str(e)}\n\nPlease try again or contact admin.")
-        bot.send_message(ADMIN_ID, f"Payment Error for user {call.from_user.id}:\n{str(e)}")
+        bot.send_message(call.message.chat.id, f"❌ Error creating payment!\n\n{str(e)}\n\nPlease try again.")
+        bot.send_message(ADMIN_ID, f"Payment Error: {str(e)}")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('check_'))
 def check_payment(call):
@@ -241,11 +244,13 @@ def check_payment(call):
         return
     
     try:
+        # Fetch payment status
         payments = razorpay_client.order.payments(order_id)
         
         if payments and payments.get('items'):
             for payment in payments['items']:
                 if payment['status'] == 'captured':
+                    # Activate user
                     expiry = int((datetime.now() + timedelta(minutes=int(order['mins']))).timestamp())
                     users_col.update_one(
                         {"user_id": order['user_id']},
@@ -253,6 +258,7 @@ def check_payment(call):
                         upsert=True
                     )
                     
+                    # Send content
                     link = links_col.find_one({"file_id": order['fid']})
                     if link:
                         bot.send_message(call.message.chat.id, f"✅ Payment Verified!\n\n🎬 Your Content:\n{link['url']}")
@@ -268,7 +274,7 @@ def check_payment(call):
             f"⏳ Payment Pending\n\n"
             f"Order ID: {order_id[:12]}\n"
             f"Amount: ₹{order['amount']}\n\n"
-            f"Please complete payment using:\nhttps://rzp.io/l/{order_id[:8]}"
+            f"Please complete payment using:\nhttps://rzp.io/rzp/{order_id}"
         )
         
     except Exception as e:
