@@ -218,7 +218,7 @@ def handle_start(message):
         else:
             markup = InlineKeyboardMarkup(row_width=2)
 
-            markup.add(
+markup.add(
     InlineKeyboardButton("⚡ 2 Days ₹50", callback_data=f"pay_{fid}_2880_50"),
     InlineKeyboardButton("🔥 7 Days ₹99", callback_data=f"pay_{fid}_10080_99")
 )
@@ -228,13 +228,13 @@ markup.add(
     InlineKeyboardButton("💎 3 Months ₹649", callback_data=f"pay_{fid}_129600_649")
 )
 
-            bot.send_message(
-                uid,
-                "🔒 Membership Required!\n\n"
-                "✨ Upgrade to Prime and unlock premium content instantly.\n\n"
-                "💳 Select your plan below:",
-                reply_markup=markup
-            )
+bot.send_message(
+    uid,
+    "🔒 Membership Required!\n\n"
+    "✨ Upgrade to Prime and unlock premium content instantly.\n\n"
+    "💳 Select your plan below:",
+    reply_markup=markup
+)
 
     else:
         text = "👋 Welcome to the Movie Bot!\n\n"
