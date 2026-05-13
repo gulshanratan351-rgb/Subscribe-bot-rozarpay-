@@ -24,10 +24,10 @@ orders_col = db['razorpay_orders']
 razorpay_client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
 
 PLANS = {
-    "2880": "50",
-    "10080": "100",
-    "43200": "200",
-    "129600": "400"
+    "2880": "50",      # 2 Days
+    "10080": "99",     # 7 Days
+    "43200": "249",    # 1 Month
+    "129600": "649"    # 3 Months
 }
 
 app = Flask(__name__)
@@ -219,14 +219,14 @@ def handle_start(message):
             markup = InlineKeyboardMarkup(row_width=2)
 
             markup.add(
-                InlineKeyboardButton("⚡ 2 Days ₹50", callback_data=f"pay_{fid}_2880_50"),
-                InlineKeyboardButton("🔥 7 Days ₹100", callback_data=f"pay_{fid}_10080_100")
-            )
+    InlineKeyboardButton("⚡ 2 Days ₹50", callback_data=f"pay_{fid}_2880_50"),
+    InlineKeyboardButton("🔥 7 Days ₹99", callback_data=f"pay_{fid}_10080_99")
+)
 
-            markup.add(
-                InlineKeyboardButton("👑 1 Month ₹200", callback_data=f"pay_{fid}_43200_200"),
-                InlineKeyboardButton("💎 3 Months ₹400", callback_data=f"pay_{fid}_129600_400")
-            )
+markup.add(
+    InlineKeyboardButton("👑 1 Month ₹249", callback_data=f"pay_{fid}_43200_249"),
+    InlineKeyboardButton("💎 3 Months ₹649", callback_data=f"pay_{fid}_129600_649")
+)
 
             bot.send_message(
                 uid,
